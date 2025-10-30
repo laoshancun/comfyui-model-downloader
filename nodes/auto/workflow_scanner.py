@@ -1,9 +1,12 @@
 from .utils import get_model_path
 from .constants import EXTENSION_MAP
 import os
+import logging
+logger = logging.getLogger(__name__)
+
 
 async def scan_workflow(prompt):
-    print(f"[Scannner] Scanning workflow.")
+    logger.info(f"[Scannner] Scanning workflow.")
     if not prompt:
         print("No workflow found")
         return []

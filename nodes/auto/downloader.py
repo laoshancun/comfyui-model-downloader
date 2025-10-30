@@ -7,7 +7,10 @@ from ..base_downloader import BaseModelDownloader
 import os
 import json
 import hashlib
+import logging
+from concurrent.futures import ThreadPoolExecutor
 
+logger = logging.getLogger(__name__)
 class AutoModelDownloader(BaseModelDownloader):
     @classmethod
     def INPUT_TYPES(cls):
@@ -38,25 +41,57 @@ class AutoModelDownloader(BaseModelDownloader):
         self.missing_models = []
         self.initialized = False
         self.last_workflow_hash = None
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="AutoModelDownloader")
         print("[AutoModelDownloader] Initialized")
+
+
+
+    def _run_async_in_thread(self, coro_func, *args):
+        """在新线程中运行异步函数"""
+        def run_in_thread():
+            try:
+                # 在新线程中创建新的事件循环
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(coro_func(*args))
+                loop.close()
+                return result
+            except Exception as e:
+                print(f"[AutoModelDownloader] Error in async thread: {e}")
+                return None
+        
+        future = self._executor.submit(run_in_thread)
+        try:
+            return future.result(timeout=60)  # 60秒超时
+        except Exception as e:
+            print(f"[AutoModelDownloader] Thread execution timeout or error: {e}")
+            future.cancel()
+            return None
 
     def process(self, select_model, prompt, node_id, log=""):
         # Check if workflow has changed
         current_hash = self._get_workflow_hash(prompt)
         workflow_changed = current_hash != self.last_workflow_hash
-
+        logger.info("download process! %s",node_id)
         # Handle missing or default values, or if workflow changed
         if not select_model or select_model == "Scan First" or workflow_changed:
             self.log = ""
 
             # Create new event loop for this thread
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+            # loop = asyncio.get_running_loop()
+            # asyncio.set_event_loop(loop)
             
             # Run scan_workflow synchronously
             try:
-                self.missing_models = loop.run_until_complete(scan_workflow(prompt))
+                logger.info("start scan process! %s",node_id)
+                # 在新线程中运行扫描
+                self.missing_models = self._run_async_in_thread(scan_workflow, prompt)
+                print(f"[AutoModelDownloader] Scan completed, found {len(self.missing_models) if self.missing_models else 0} models")
                 
+                if self.missing_models is None:
+                    print("[AutoModelDownloader] Scan returned None, using empty list")
+                    self.missing_models = []
+                logger.info("scan process finished! %s",self.missing_models)
                 # Remove duplicates
                 seen = set()
                 unique_models = [model for model in self.missing_models if not (identifier := (model['filename'], model['local_path'])) in seen and not seen.add(identifier)]
@@ -64,23 +99,25 @@ class AutoModelDownloader(BaseModelDownloader):
 
                 valid_models = []
                 # Search for each model
-                async def search_all_models():
-                    if not self.missing_models:  # Check if list is empty
-                        return
-                    
-                    for model in self.missing_models:
+                async def search_models_async(models_list):
+                    results = []
+                    for model in models_list:
                         result = await search_for_model(model['filename'])
-                        if result and result.get('repo_id'):  # Only add if we have a valid repo_id
+                        if result and result.get('repo_id'):
                             model['repo_id'] = result['repo_id']
-                            valid_models.append(model)
-
+                            results.append(model)
                             print(f"[Downloader] {model['filename']} → {model['repo_id']}")
                         else:
                             print(f"[Downloader] {model['filename']} → not found")
+                    return results
 
-                loop.run_until_complete(search_all_models())
-            finally:
-                loop.close()
+                # 在新线程中运行模型搜索
+                valid_models = self._run_async_in_thread(search_models_async, self.missing_models) or []
+                print(f"[AutoModelDownloader] Model search completed, found {len(valid_models)} valid models")  
+            except Exception as e:
+                print(f"[AutoModelDownloader] Error during model scanning: {e}")
+                self.missing_models = []
+                valid_models = []
 
             self.missing_models = valid_models            
                     

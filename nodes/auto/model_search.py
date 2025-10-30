@@ -42,7 +42,7 @@ async def search_for_model(filename):
         search_queries.append(components["core_name"])
     search_queries.append("_".join([components["core_name"], *components["tags"]]))
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(trust_env=True) as session:
         for query in search_queries:
             async with session.get(f"{base_url}?full=true&search={query}") as response:
                 if response.status == 200:
